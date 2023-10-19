@@ -26,6 +26,22 @@ impl IdMap {
         }
     }
 
+    /// Create a mapping from the current UID to an inner UID.
+    pub fn self_to_inner_uid(inner_uid: u32) -> IdMap {
+        let uid = unsafe { libc::getuid() };
+        let mut map = Self::new();
+        map.map_one(uid, inner_uid);
+        map
+    }
+
+    /// Create a mapping from the current GID to an inner GID.
+    pub fn self_to_inner_gid(inner_gid: u32) -> IdMap {
+        let gid = unsafe { libc::getgid() };
+        let mut map = Self::new();
+        map.map_one(gid, inner_gid);
+        map
+    }
+
     pub fn map_one(&mut self, outer_id: u32, inner_id: u32) {
         self.mappings.push(Mapping {
             inner_id,
