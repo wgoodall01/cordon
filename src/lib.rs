@@ -1,6 +1,7 @@
 use alloc_counter::{no_alloc, AllocCounterSystem};
 use std::ffi::{c_char, c_int, c_void};
 use std::mem;
+use std::ptr;
 
 pub mod id_map;
 
@@ -148,6 +149,13 @@ pub struct Command {
 
     /// Set a custom group ID for the child process.
     pub set_gid: Option<u32>,
+
+    /// If set, pivot root to this directory before executing the command.
+    pub pivot_root_to: Option<*const c_char>,
+
+    /// If set, change directory to this path (relative to the child's root) before
+    /// execiting the command.
+    pub set_working_dir: Option<*const c_char>,
 }
 
 /// Handle representing an isolated child process.
@@ -447,7 +455,7 @@ unsafe fn inner_child_entrypoint(arg: &mut InnerChildArg) -> Result<()> {
     socket_recv::<u8>(arg.idmap_sync_rx_fd)
         .map_err(|e| e.context("Failed to read from uid/gidmap sync socket"))?;
 
-    // Set UID and GID
+    // Set our UID and GID
     if let Some(uid) = cmd.set_uid {
         let 0 = libc::setuid(uid) else {
             bail_errno!("setuid failed");
@@ -463,7 +471,57 @@ unsafe fn inner_child_entrypoint(arg: &mut InnerChildArg) -> Result<()> {
     let (gid, egid) = (libc::getgid(), libc::getegid());
     eprintln!("inner: after setuid/setgid: uid={uid} euid={euid} gid={gid} egid={egid}");
 
-    // For now, simply exec the command.
+    // If we're in a mount namespace, remount the root as slave recursive.
+    if cmd.enter_mount_namespace {
+        let 0 = libc::mount(
+            ptr::null(),
+            b"/\0".as_ptr().cast(),
+            ptr::null(),
+            libc::MS_PRIVATE | libc::MS_REC, // MS_PRIVATE instead of MS_SLAVE ?
+            ptr::null(),
+        ) else {
+            bail_errno!("remounting root as slave recursive failed");
+        };
+    }
+    eprintln!("inner: remounted root as recursive slave");
+
+    // Pivot to the new root, if necessary, using the `pivot_root(.,.)` shortcut.
+    if let Some(new_root) = cmd.pivot_root_to {
+        // Bind-mount the new root to itself (because the new root must be a mount point).
+        let 0 = libc::mount(new_root, new_root, ptr::null(), libc::MS_BIND, ptr::null()) else {
+            bail_errno!("re-bind-mounting pivot_root location failed");
+        };
+
+        // CD into the new root.
+        let 0 = libc::chdir(new_root) else {
+            bail_errno!("chdir to pivot_root location failed");
+        };
+
+        // Pivot root into the new root.
+        let dot = ".\0".as_ptr();
+        let 0 = libc::syscall(libc::SYS_pivot_root, dot, dot) else {
+            bail_errno!("pivot_root failed");
+        };
+
+        // Unmount the old root, and remove the mount point.
+        let 0 = libc::umount2(dot, libc::MNT_DETACH) else {
+            bail_errno!("failed to detact old root mount point");
+        };
+
+        // Set the working directory to "/" within the new root.
+        let 0 = libc::chdir(b"/\0".as_ptr()) else {
+            bail_errno!("chdir to / after pivot_root failed");
+        };
+    }
+
+    // Set the working directory.
+    if let Some(working_dir) = cmd.set_working_dir {
+        let 0 = libc::chdir(working_dir) else {
+            bail_errno!("chdir to set_working_dir failed");
+        };
+    }
+
+    // Execute the child command.
     let 0 = libc::execve(cmd.command, cmd.args.as_ptr(), cmd.envp.as_ptr()) else {
         bail_errno!("exec_command failed");
     };

@@ -4,7 +4,7 @@ use std::ffi::CString;
 use std::ptr;
 
 pub fn main() {
-    let cmd_path = CString::new("/usr/bin/sh").unwrap();
+    let cmd_path = CString::new("/bin/sh").unwrap();
 
     let _null_fd = unsafe { libc::open("/dev/null\0".as_ptr().cast(), libc::O_RDWR) };
 
@@ -24,6 +24,8 @@ pub fn main() {
         set_gid: None,
         uid_map: Some(IdMap::self_to_inner_uid(target_uid)),
         gid_map: Some(IdMap::self_to_inner_gid(target_gid)),
+        pivot_root_to: Some(b"./_root\0".as_ptr()),
+        set_working_dir: Some(b"/yeet\0".as_ptr()),
     };
 
     let child = unsafe { cordon::spawn(cmd) }.unwrap();
