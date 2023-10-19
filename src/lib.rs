@@ -377,6 +377,8 @@ unsafe fn outer_child_entrypoint(arg: &mut OuterChildArg) -> Result<()> {
     clone_flags |= libc::CLONE_PARENT;
 
     // If configured, enter a new mount namespace here.
+    // TODO: For about an 0.1ms latency bump, we can avoid a double-fork by entering the mount
+    // namespace using `unshare(2)` instead of `clone(2)`.
     if cmd.enter_mount_namespace {
         clone_flags |= libc::CLONE_NEWNS;
     }

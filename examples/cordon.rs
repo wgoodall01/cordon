@@ -30,9 +30,6 @@ pub fn main() {
 
     let child = unsafe { cordon::spawn(cmd) }.unwrap();
 
-    // Wait a bit so the logs can sort themselves out
-    std::thread::sleep(std::time::Duration::from_millis(100));
-
     let exit = child.wait().unwrap();
     eprintln!("exit={exit:?}");
     assert!(exit.success());
