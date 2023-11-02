@@ -138,6 +138,9 @@ pub struct Command {
     /// Run the command in a mount namespace?
     pub enter_mount_namespace: bool,
 
+    /// Run the command in a PID namespace?
+    pub enter_pid_namespace: bool,
+
     /// Contents of the `/proc/PID/uid_map` file.
     pub uid_map: Option<id_map::IdMap>,
 
@@ -378,9 +381,15 @@ unsafe fn outer_child_entrypoint(arg: &mut OuterChildArg) -> Result<()> {
 
     // If configured, enter a new mount namespace here.
     // TODO: For about an 0.1ms latency bump, we can avoid a double-fork by entering the mount
-    // namespace using `unshare(2)` instead of `clone(2)`.
+    // namespace using `unshare(2)` instead of `clone(2)`, IFF we do not need to enter a PID
+    // namespace (which requires another fork, even when `unshare(2)` is used).
     if cmd.enter_mount_namespace {
         clone_flags |= libc::CLONE_NEWNS;
+    }
+
+    // If configured, enter a new PID namespace here.
+    if cmd.enter_pid_namespace {
+        clone_flags |= libc::CLONE_NEWPID;
     }
 
     // Get the stack pointer for the child.

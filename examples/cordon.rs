@@ -14,6 +14,7 @@ pub fn main() {
     let cmd = cordon::Command {
         enter_user_namespace: true,
         enter_mount_namespace: true,
+        enter_pid_namespace: false,
         command: cmd_path.as_ptr(),
         args: vec![cmd_path.as_ptr(), ptr::null()],
         envp: vec![ptr::null()],
