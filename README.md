@@ -9,6 +9,10 @@ Embeddable, customizable rootless containerization for Rust.
 - [x] M3: PID namespace and UID mapping
 - [ ] M4: Control groups
 
+## Features
+
+- [x] Give the child a list of mounts
+
 ### M1: Steel Thread
 
 A complete, yet limited, working implementation of the library, which can spawn a user-specified program in a user namespace.
@@ -26,5 +30,4 @@ _This milestone will be complete when files written inside the sandbox appear to
 
 ### M4: Control groups
 
-We'll add the ability to place the sandboxed child process in a Linux control group, and allow the caller to set its parameters.
-\*This milestone will be complete when the
+We'll add the ability to place the sandboxed child process in a Linux control group, and allow the caller to set its parameters. This milestone will be complete when the host can suspend and resume the sandboxed child using the cgroup freezer.

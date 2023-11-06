@@ -10,3 +10,4 @@ edition = "2021"
 [dependencies]
 alloc_counter = "0.0.4"
 libc = "0.2.148"
+c_str_macro = "1.0.3"

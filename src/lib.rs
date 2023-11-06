@@ -4,11 +4,15 @@ use std::mem;
 use std::ptr;
 
 pub mod id_map;
+pub mod mount_table;
 
 /// In test builds, use alloc_counter to verify at runtime that the functions which must be
 /// async-signal-safe do not allocate.
 #[cfg_attr(debug_assertions, global_allocator)]
 static ALLOC: AllocCounterSystem = AllocCounterSystem;
+
+/// Size of the stack for cloned children.
+const STACK_SIZE: usize = 8 * 1024 * 1024; // 8 MB
 
 #[derive(Debug)]
 pub struct Error {
@@ -101,10 +105,16 @@ impl std::fmt::Display for Error {
         };
 
         match (self.context, self.cause) {
-            (Some(context), None) => write!(f, "{}: {}", context, error_msg_str),
-            (None, Some(cause)) => write!(f, "{}: {}", cause, error_msg_str),
-            (Some(context), Some(cause)) => write!(f, "{}: {}: {}", context, cause, error_msg_str),
-            (None, None) => write!(f, "{}", error_msg_str),
+            (Some(context), None) => {
+                write!(f, "{}: {} (errno {})", context, error_msg_str, self.errno)
+            }
+            (None, Some(cause)) => write!(f, "{}: {} (errno {})", cause, error_msg_str, self.errno),
+            (Some(context), Some(cause)) => write!(
+                f,
+                "{}: {}: {} (errno {})",
+                context, cause, error_msg_str, self.errno
+            ),
+            (None, None) => write!(f, "{} (errno {})", error_msg_str, self.errno),
         }
     }
 }
@@ -112,7 +122,7 @@ impl std::fmt::Display for Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Command to execute inside the sandbox.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Command {
     /// Command to execute.
     pub command: *const c_char,
@@ -132,14 +142,8 @@ pub struct Command {
     /// File descriptor to use as stderr. If None, stderr is inherited from the parent.
     pub stderr_fd: Option<c_int>,
 
-    /// Run the command in a user namespace?
-    pub enter_user_namespace: bool,
-
-    /// Run the command in a mount namespace?
-    pub enter_mount_namespace: bool,
-
-    /// Run the command in a PID namespace?
-    pub enter_pid_namespace: bool,
+    /// The set of namespaces which should be created and entered by the child process.
+    pub namespaces: NamespaceSet,
 
     /// Contents of the `/proc/PID/uid_map` file.
     pub uid_map: Option<id_map::IdMap>,
@@ -159,6 +163,22 @@ pub struct Command {
     /// If set, change directory to this path (relative to the child's root) before
     /// execiting the command.
     pub set_working_dir: Option<*const c_char>,
+
+    /// Mount these filesystems in the container after any mount namespace has been set up.
+    pub mounts: mount_table::MountTable,
+}
+
+/// Bitset of namespaces to enter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct NamespaceSet {
+    pub cgroup: bool,
+    pub ipc: bool,
+    pub network: bool,
+    pub mount: bool,
+    pub pid: bool,
+    // pub time: bool, // This isn't important to support.
+    pub user: bool,
+    pub uts: bool,
 }
 
 /// Handle representing an isolated child process.
@@ -216,19 +236,19 @@ pub unsafe fn spawn(cmd: Command) -> Result<Child> {
     // Create the child in a new user namespace.
     let mut clone_flags = 0;
 
-    // NOTE: You MUST set `SIGCHLD` in order for `clone()` to work properly.
+    // NOTE: You MUST set `SIGCHLD` in order for `waitpid()` after `clone()` to work properly.
     clone_flags |= libc::SIGCHLD;
 
     // If configured, enter a new user namespace here.
-    if cmd.enter_user_namespace {
+    if cmd.namespaces.user {
         clone_flags |= libc::CLONE_NEWUSER;
     }
 
     // Allocate the stack for the inner child, so we can pass it through the outer child.
-    let inner_child_stack = vec![0; 8192];
+    let inner_child_stack = vec![0; STACK_SIZE];
 
     // Allocate the stack for the outer child, and get its topmost address.
-    let mut outer_child_stack = vec![0; 8192];
+    let mut outer_child_stack = vec![0; STACK_SIZE];
     let outer_child_stack_ptr = get_topmost_stack_pointer(outer_child_stack.as_mut());
 
     // Construct the argument to the child entrypoint.
@@ -335,7 +355,7 @@ extern "C" fn outer_child_extern(arg: *mut c_void) -> c_int {
 
 /// Handler for the outer clone.
 /// - Runs inside userns.
-// #[cfg_attr(debug_assertions, no_alloc)]
+#[cfg_attr(debug_assertions, no_alloc)]
 unsafe fn outer_child_entrypoint(arg: &mut OuterChildArg) -> Result<()> {
     let cmd: &Command = &*arg.cmd;
 
@@ -372,7 +392,7 @@ unsafe fn outer_child_entrypoint(arg: &mut OuterChildArg) -> Result<()> {
     // Calculate the clone flags for the child.
     let mut clone_flags = 0;
 
-    // NOTE: You MUST set `SIGCHLD` in order for `clone()` to work properly.
+    // NOTE: You MUST set `SIGCHLD` in order for `waitpid()` after `clone()` to work properly.
     clone_flags |= libc::SIGCHLD;
 
     // When the inner child is created, create it as a sibling process to this process in the
@@ -383,13 +403,33 @@ unsafe fn outer_child_entrypoint(arg: &mut OuterChildArg) -> Result<()> {
     // TODO: For about an 0.1ms latency bump, we can avoid a double-fork by entering the mount
     // namespace using `unshare(2)` instead of `clone(2)`, IFF we do not need to enter a PID
     // namespace (which requires another fork, even when `unshare(2)` is used).
-    if cmd.enter_mount_namespace {
+    if cmd.namespaces.mount {
         clone_flags |= libc::CLONE_NEWNS;
     }
 
     // If configured, enter a new PID namespace here.
-    if cmd.enter_pid_namespace {
+    if cmd.namespaces.pid {
         clone_flags |= libc::CLONE_NEWPID;
+    }
+
+    // If configured, enter a new UTS namespace here.
+    if cmd.namespaces.uts {
+        clone_flags |= libc::CLONE_NEWUTS;
+    }
+
+    // If configured, enter a new SysV IPC namespace here.
+    if cmd.namespaces.ipc {
+        clone_flags |= libc::CLONE_NEWIPC;
+    }
+
+    // If configured, enter a new network namespace here.
+    if cmd.namespaces.network {
+        clone_flags |= libc::CLONE_NEWNET;
+    }
+
+    // If configured, enter a new cgroup namespace here.
+    if cmd.namespaces.cgroup {
+        clone_flags |= libc::CLONE_NEWCGROUP;
     }
 
     // Get the stack pointer for the child.
@@ -460,35 +500,15 @@ unsafe fn inner_child_entrypoint(arg: &mut InnerChildArg) -> Result<()> {
     eprintln!("inner: pid={pid}");
     eprintln!("inner: uid={uid} euid={euid} gid={gid} egid={egid}");
 
-    // Receive a byte from the sync socket to wait for uid_map, setgroups, and gid_map to be
-    // written.
-    // TODO: can this be moved to the inner child before setuid/setgid?
-    socket_recv::<u8>(arg.idmap_sync_rx_fd)
-        .map_err(|e| e.context("Failed to read from uid/gidmap sync socket"))?;
-
-    // Set our UID and GID
-    if let Some(uid) = cmd.set_uid {
-        let 0 = libc::setuid(uid) else {
-            bail_errno!("setuid failed");
-        };
-    }
-    if let Some(gid) = cmd.set_gid {
-        let 0 = libc::setgid(gid) else {
-            bail_errno!("setgid failed");
-        };
-    }
-
-    let (uid, euid) = (libc::getuid(), libc::geteuid());
-    let (gid, egid) = (libc::getgid(), libc::getegid());
-    eprintln!("inner: after setuid/setgid: uid={uid} euid={euid} gid={gid} egid={egid}");
-
     // If we're in a mount namespace, remount the root as slave recursive.
-    if cmd.enter_mount_namespace {
+    if cmd.namespaces.mount {
         let 0 = libc::mount(
             ptr::null(),
             b"/\0".as_ptr().cast(),
             ptr::null(),
-            libc::MS_PRIVATE | libc::MS_REC, // MS_PRIVATE instead of MS_SLAVE ?
+            // MS_SLAVE: Mount events from the host should propagate in, but mount events
+            // in the guest should not propagate out.
+            libc::MS_SLAVE | libc::MS_REC,
             ptr::null(),
         ) else {
             bail_errno!("remounting root as slave recursive failed");
@@ -496,10 +516,75 @@ unsafe fn inner_child_entrypoint(arg: &mut InnerChildArg) -> Result<()> {
     }
     eprintln!("inner: remounted root as recursive slave");
 
+    // Mount the user-supplied mount table.
+    for mount in &cmd.mounts.mounts {
+        // NOTE: There is a TOCTOU race condition between reading the filetype of the source, and creating the right kind of mountpoint. Normally this is not an issue, but it will cause a failure if the source filetype changes from file to directory.
+        if let Some(mut mountpoint_type) = mount.create_mountpoint {
+            eprintln!(
+                "inner: creating mountpoint for {:?} on {:?}",
+                mount.source, mount.target
+            );
+
+            // If the mountpoint type is DetermineFromSource, `stat()` the source.
+            if mountpoint_type == mount_table::MountpointType::DetermineFromSource {
+                // Is the source a file or a directory?
+                let source_stat = stat(mount.source.as_ptr()).map_err(|e| {
+                    e.context("failed to stat() mount source while creating mountpoint")
+                })?;
+
+                if source_stat.st_mode & libc::S_IFMT == libc::S_IFDIR {
+                    mountpoint_type = mount_table::MountpointType::Dir;
+                } else {
+                    mountpoint_type = mount_table::MountpointType::File;
+                }
+            }
+
+            match mountpoint_type {
+                mount_table::MountpointType::Dir => {
+                    let target_ptr: *const c_char = mount.target.as_ptr().cast();
+                    mkdirp(target_ptr)
+                        .map_err(|e| e.context("failed to mkdir() directory mountpoint"))?;
+                }
+                mount_table::MountpointType::File => {
+                    let 0 = libc::creat(mount.target.as_ptr(), 0o644) else {
+                        bail_errno!("failed to creat() file mountpoint");
+                    };
+                }
+                mount_table::MountpointType::DetermineFromSource => {
+                    unreachable!("type should have been resolved earlier in the function")
+                }
+            }
+        }
+
+        eprintln!(
+            "inner: mounting {:?} on {:?} type {:?}",
+            mount.source, mount.target, mount.fstype
+        );
+        let 0 = libc::mount(
+            mount.source.as_ptr(),
+            mount.target.as_ptr(),
+            mount.fstype.as_ptr(),
+            mount.flags,
+            match &mount.data {
+                Some(data) => data.as_ptr().cast(),
+                None => ptr::null(),
+            },
+        ) else {
+            bail_errno!("user mount failed");
+        };
+    }
+
     // Pivot to the new root, if necessary, using the `pivot_root(.,.)` shortcut.
     if let Some(new_root) = cmd.pivot_root_to {
         // Bind-mount the new root to itself (because the new root must be a mount point).
-        let 0 = libc::mount(new_root, new_root, ptr::null(), libc::MS_BIND, ptr::null()) else {
+        let 0 = libc::mount(
+            new_root,
+            new_root,
+            ptr::null(),
+            // Note: We need MS_REC here so that bind mounts inside the new root are propagated.
+            libc::MS_BIND | libc::MS_REC,
+            ptr::null(),
+        ) else {
             bail_errno!("re-bind-mounting pivot_root location failed");
         };
 
@@ -531,6 +616,27 @@ unsafe fn inner_child_entrypoint(arg: &mut InnerChildArg) -> Result<()> {
             bail_errno!("chdir to set_working_dir failed");
         };
     }
+
+    // Receive a byte from the sync socket to wait for uid_map, setgroups, and gid_map to be
+    // written.
+    socket_recv::<u8>(arg.idmap_sync_rx_fd)
+        .map_err(|e| e.context("Failed to read from uid/gidmap sync socket"))?;
+
+    // Set our UID and GID
+    if let Some(uid) = cmd.set_uid {
+        let 0 = libc::setuid(uid) else {
+            bail_errno!("setuid failed");
+        };
+    }
+    if let Some(gid) = cmd.set_gid {
+        let 0 = libc::setgid(gid) else {
+            bail_errno!("setgid failed");
+        };
+    }
+
+    let (uid, euid) = (libc::getuid(), libc::geteuid());
+    let (gid, egid) = (libc::getgid(), libc::getegid());
+    eprintln!("inner: after setuid/setgid: uid={uid} euid={euid} gid={gid} egid={egid}");
 
     // Execute the child command.
     let 0 = libc::execve(cmd.command, cmd.args.as_ptr(), cmd.envp.as_ptr()) else {
@@ -643,6 +749,61 @@ fn write_str(path: *const c_char, contents: *const c_char, flags: c_int) -> Resu
     Ok(())
 }
 
+fn stat(path: *const c_char) -> Result<libc::stat> {
+    let mut stat_buf = mem::MaybeUninit::<libc::stat>::uninit();
+    let 0.. = (unsafe { libc::stat(path, stat_buf.as_mut_ptr()) }) else {
+        bail_errno!("failed to stat file");
+    };
+    Ok(unsafe { stat_buf.assume_init() })
+}
+
+/// Create a directory for all non-existent path components of `path`.
+fn mkdirp(path: *const c_char) -> Result<()> {
+    let mkdir_ignoring_eexist = |path: *const c_char| -> Result<()> {
+        let mkdir_result = unsafe { libc::mkdir(path, 0o755) };
+        if mkdir_result == -1 {
+            let err = Error::last_os_error();
+            if err.errno != libc::EEXIST {
+                return Err(err.cause("failed to create directory"));
+            }
+        };
+        Ok(())
+    };
+
+    // Error if the path is longer than PATH_MAX.
+    let path_len = unsafe { libc::strlen(path) };
+    if path_len > libc::PATH_MAX as usize {
+        bail!("mkdirp() path is longer than PATH_MAX");
+    }
+    // Copy the path to a local buffer.
+    let mut buf = [b'\0'; libc::PATH_MAX as usize + 1];
+    buf[..path_len + 1].copy_from_slice(unsafe { std::slice::from_raw_parts(path, path_len + 1) });
+
+    // Loop through indices of `/` characters in the buffer to create ancestors.
+    for i in 1..buf.len() {
+        if buf[i] == b'\0' {
+            break;
+        }
+        if buf[i] != b'/' {
+            continue;
+        }
+
+        // Replace the `/` with a null byte.
+        buf[i] = b'\0';
+
+        // Create the directory, ignoring EEXIST.
+        mkdir_ignoring_eexist(buf.as_ptr())?;
+
+        // Put the `/` back.
+        buf[i] = b'/';
+    }
+
+    // Create the final directory.
+    mkdir_ignoring_eexist(buf.as_ptr().cast())?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -655,18 +816,20 @@ mod tests {
         let null_fd = unsafe { libc::open("/dev/null\0".as_ptr().cast(), libc::O_RDONLY) };
 
         let cmd = Command {
-            enter_user_namespace: false,
-            enter_mount_namespace: false,
             command: cmd_path.as_ptr(),
             args: vec![cmd_path.as_ptr(), ptr::null()],
             envp: vec![ptr::null()],
             stdin_fd: Some(null_fd),
             stdout_fd: Some(null_fd),
             stderr_fd: Some(null_fd),
+            namespaces: NamespaceSet::default(),
             uid_map: None,
             gid_map: None,
             set_uid: None,
             set_gid: None,
+            pivot_root_to: None,
+            set_working_dir: None,
+            mounts: mount_table::MountTable::new(),
         };
 
         let child = unsafe { spawn(cmd) }.unwrap();
@@ -686,18 +849,24 @@ mod tests {
         uid_map.map_one(unsafe { libc::getuid() }, 0);
 
         let cmd = Command {
-            enter_user_namespace: true,
-            enter_mount_namespace: true,
             command: cmd_path.as_ptr(),
             args: vec![cmd_path.as_ptr(), ptr::null()],
             envp: vec![ptr::null()],
             stdin_fd: None,
             stdout_fd: None,
             stderr_fd: None,
+            namespaces: NamespaceSet {
+                user: true,
+                mount: true,
+                ..NamespaceSet::default()
+            },
             uid_map: Some(uid_map),
             gid_map: None,
             set_uid: Some(0),
             set_gid: None,
+            pivot_root_to: None,
+            set_working_dir: None,
+            mounts: mount_table::MountTable::new(),
         };
 
         let child = unsafe { spawn(cmd) }.unwrap();
