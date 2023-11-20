@@ -57,7 +57,7 @@ pub fn main() {
 
     let cmd_path = CString::new("/bin/sh").unwrap();
 
-    let cmd = cordon::Command {
+    let ctx = cordon::Context {
         command: cmd_path.as_ptr(),
         args: vec![cmd_path.as_ptr(), ptr::null()],
         envp: vec![b"ENVVAR=test\0".as_ptr(), ptr::null()],
@@ -85,7 +85,7 @@ pub fn main() {
         }),
     };
 
-    let child = unsafe { cordon::spawn(cmd) }.unwrap();
+    let child = unsafe { cordon::spawn(ctx) }.unwrap();
 
     let exit = child.wait().unwrap();
     eprintln!("exit={exit:?}");

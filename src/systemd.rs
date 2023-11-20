@@ -57,6 +57,12 @@ pub struct ScopeHandle {
     unit_name: String,
 }
 
+impl ScopeHandle {
+    pub fn unit_name(&self) -> &str {
+        self.unit_name.as_str()
+    }
+}
+
 /// Start a transient systemd unit containing the given pid.
 /// `scope_name` must be a valid systemd scope name, ending in `.scope`.
 #[instrument(level = "debug", skip_all, fields(unit = %params.unit_name))]
