@@ -14,3 +14,5 @@ c_str_macro = "1.0.3"
 dbus = "0.9.7"
 rand = "0.8.5"
 thiserror = "1.0.50"
+tracing = "0.1.40"
+tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }

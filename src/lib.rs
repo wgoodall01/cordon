@@ -1,7 +1,11 @@
 use alloc_counter::{no_alloc, AllocCounterSystem};
 use std::ffi::{c_char, c_int, c_void};
+use std::io::{BufRead, Write};
 use std::mem;
+use std::os::fd::FromRawFd;
 use std::ptr;
+
+use tracing::{debug, span, Level};
 
 pub mod id_map;
 pub mod mount_table;
@@ -91,6 +95,32 @@ macro_rules! bail_errno {
     };
     ($msg:expr) => {
         return Err(Error::last_os_error().cause($msg));
+    };
+}
+
+/// Log a message (given in format_args! style) by writing it to a file descriptor.
+///
+/// This cannot allocate---buffer messages to a fixed-length, stack-allocated 2048-byte buffer.
+///
+/// ```
+/// log_fd!(fd, "msg {param}", param = 42)
+/// ```
+macro_rules! log_fd {
+    ($fd:expr, $fmt:expr) => {
+        {
+            let mut buffer = [0u8; 2048];
+            let mut cursor = std::io::Cursor::new(&mut buffer[..]);
+            let _ = writeln!(cursor, $fmt);
+            let _ = unsafe {libc::write($fd, cursor.get_ref().as_ptr() as *const c_void, cursor.position() as usize)};
+        }
+    };
+    ($fd:expr, $fmt:expr, $($arg:tt)*) => {
+        {
+            let mut buffer = [0u8; 2048];
+            let mut cursor = std::io::Cursor::new(&mut buffer[..]);
+            let _ = writeln!(cursor, $fmt, $($arg)*);
+            let _ = unsafe {libc::write($fd, cursor.get_ref().as_ptr() as *const c_void, cursor.position() as usize)};
+        }
     };
 }
 
@@ -221,8 +251,20 @@ impl ExitStatus {
 ///
 /// The pointers in `cmd` must be valid until this function returns.
 pub unsafe fn spawn(cmd: Command) -> Result<Child> {
-    let pid = libc::getpid();
-    eprintln!("spawn: spawning: pid={pid}");
+    let span = span!(Level::DEBUG, "spawn");
+    let _span_guard = span.enter();
+
+    // Create the outer child's log stream.
+    let (log_outer_tx_fd, log_outer_rx_fd) = socket_pair()
+        .map_err(|e| e.context("Failed to create log stream for outer child socket"))?;
+    let log_outer_span = span!(Level::DEBUG, "outer");
+    let _log_outer_follower_handle = spawn_log_forwarder(log_outer_span.clone(), log_outer_rx_fd);
+
+    // Create the inner child's log stream.
+    let (log_inner_tx_fd, log_inner_rx_fd) = socket_pair()
+        .map_err(|e| e.context("Failed to create log stream for inner child socket"))?;
+    let log_inner_span = span!(parent: log_outer_span, Level::DEBUG, "inner");
+    let _log_inner_follower_handle = spawn_log_forwarder(log_inner_span, log_inner_rx_fd);
 
     // Create the IdMap sync socket.
     // We send one byte from the parent to the child once the uid_map and gid_map have been
@@ -266,7 +308,9 @@ pub unsafe fn spawn(cmd: Command) -> Result<Child> {
     let mut outer_child_arg = OuterChildArg {
         cmd: &cmd,
         idmap_sync_rx_fd,
+        log_outer_tx_fd,
         cgroup_sync_rx_fd,
+        log_inner_tx_fd,
         pid_return_tx_fd,
         inner_child_stack,
     };
@@ -280,13 +324,18 @@ pub unsafe fn spawn(cmd: Command) -> Result<Child> {
         bail_errno!("clone(2) failed");
     };
 
-    eprintln!("spawn: outer_child_pid={outer_child_pid}");
+    // After we've cloned the first child, close our copies of the send end of the logging file
+    // descriptors.
+    let _ = libc::close(log_outer_tx_fd);
+    let _ = libc::close(log_inner_tx_fd);
+
+    debug!(%outer_child_pid);
 
     // Ask systemd to arrange a cgroup for our child process.
     if let Some(scope_config) = cmd.scope {
         systemd::start_transient_unit(outer_child_pid.try_into().unwrap(), scope_config).map_err(
             |e| {
-                eprintln!("spawn: failed to start systemd unit: {e}");
+                debug!(err=%e, "failed to start systemd unit");
                 Error::new().cause("Failed to start transient systemd unit")
             },
         )?;
@@ -299,7 +348,7 @@ pub unsafe fn spawn(cmd: Command) -> Result<Child> {
 
     // Write the UID map.
     if let Some(uid_map) = cmd.uid_map {
-        eprintln!("spawn: writing uid_map");
+        debug!("writing uid_map");
         std::fs::write(
             format!("/proc/{outer_child_pid}/uid_map"),
             uid_map.into_idmap_file_contents(),
@@ -324,17 +373,17 @@ pub unsafe fn spawn(cmd: Command) -> Result<Child> {
     // Send a byte to the child, to signal that we've written the uid/gid maps.
     socket_send::<u8>(idmap_sync_tx_fd, 0)
         .map_err(|e| e.context("Failed to send to uid/gidmap sync socket"))?;
-    eprintln!("spawn: sent to idmap_sync_tx_fd");
+    debug!("sent to idmap_sync_tx_fd");
 
     // Wait for the outer child to send us the PID of the inner child.
     let inner_child_pid: c_int = socket_recv::<c_int>(pid_return_rx_fd)
         .map_err(|e| e.context("Failed to receive from pid return socket"))?;
-    eprintln!("spawn: got inner_child_pid={inner_child_pid}");
+    debug!(inner_child_pid=?inner_child_pid, "got inner_child_pid");
 
     // Wait for the outer child to exit.
     let outer_child_exit =
         waitpid(outer_child_pid).map_err(|e| e.context("failed to wait for outer child exit"))?;
-    eprintln!("spawn: got outer_child_exit={outer_child_exit:?}");
+    debug!(outer_child_exit=?outer_child_exit, "got outer_child_exit");
 
     // Return the pid of the inner child, which eventually becomes the target subprocess.
     // We can do this because it is spawned by the outer child with CLONE_PARENT, so it will always
@@ -356,12 +405,15 @@ struct OuterChildArg {
     idmap_sync_rx_fd: c_int,
     cgroup_sync_rx_fd: c_int,
     pid_return_tx_fd: c_int,
+    log_outer_tx_fd: c_int,
+    log_inner_tx_fd: c_int,
     inner_child_stack: Vec<u8>,
 }
 
 #[cfg_attr(debug_assertions, no_alloc)]
 extern "C" fn outer_child_extern(arg: *mut c_void) -> c_int {
     let arg: &mut OuterChildArg = unsafe { &mut *(arg as *mut OuterChildArg) };
+    let lfd = arg.log_outer_tx_fd;
 
     // Catch any panics.
     let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
@@ -369,7 +421,7 @@ extern "C" fn outer_child_extern(arg: *mut c_void) -> c_int {
     })) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("outer: caught panic: {e:?}");
+            log_fd!(lfd, "caught panic: {e:?}");
             return 126;
         }
     };
@@ -377,7 +429,7 @@ extern "C" fn outer_child_extern(arg: *mut c_void) -> c_int {
     // Match the result.
     result
         .map(|()| 0)
-        .map_err(|e| eprintln!("inner: error: {}", e))
+        .map_err(|e| log_fd!(lfd, "error: {}", e))
         .unwrap_or(42)
 }
 
@@ -385,6 +437,7 @@ extern "C" fn outer_child_extern(arg: *mut c_void) -> c_int {
 /// - Runs inside userns.
 #[cfg_attr(debug_assertions, no_alloc)]
 unsafe fn outer_child_entrypoint(arg: &mut OuterChildArg) -> Result<()> {
+    let lfd: c_int = arg.log_outer_tx_fd;
     let cmd: &Command = &*arg.cmd;
 
     let pid = libc::getpid();
@@ -393,25 +446,23 @@ unsafe fn outer_child_entrypoint(arg: &mut OuterChildArg) -> Result<()> {
     let gid = libc::getgid();
     let egid = libc::getegid();
 
-    eprintln!("outer: pid={pid}");
-    eprintln!("outer: uid={uid} euid={euid}");
-    eprintln!("outer: gid={gid} egid={egid}");
+    log_fd!(lfd, "pid={pid} uid={uid} euid={euid} gid={gid} egid={egid}");
 
     // Configure stdin, stdout, and stderr.
     if let Some(stdin_fd) = cmd.stdin_fd {
-        eprintln!("outer: set stdin_fd={stdin_fd}");
+        log_fd!(lfd, "set stdin_fd={stdin_fd}");
         let 0.. = libc::dup2(stdin_fd, libc::STDIN_FILENO) else {
             bail_errno!("dup2(stdin_fd) failed");
         };
     }
     if let Some(stdout_fd) = cmd.stdout_fd {
-        eprintln!("outer: set stdout_fd={stdout_fd}");
+        log_fd!(lfd, "set stdout_fd={stdout_fd}");
         let 0.. = libc::dup2(stdout_fd, libc::STDOUT_FILENO) else {
             bail_errno!("dup2(stdout_fd) failed");
         };
     }
     if let Some(stderr_fd) = cmd.stderr_fd {
-        eprintln!("outer: set stderr_fd={stderr_fd}");
+        log_fd!(lfd, "set stderr_fd={stderr_fd}");
         let 0.. = libc::dup2(stderr_fd, libc::STDERR_FILENO) else {
             bail_errno!("dup2(stderr_fd) failed");
         };
@@ -467,6 +518,7 @@ unsafe fn outer_child_entrypoint(arg: &mut OuterChildArg) -> Result<()> {
     let mut inner_child_arg = InnerChildArg {
         cmd: arg.cmd,
         idmap_sync_rx_fd: arg.idmap_sync_rx_fd,
+        log_inner_tx_fd: arg.log_inner_tx_fd,
     };
 
     // Wait for our cgroup to be created before we clone.
@@ -482,12 +534,12 @@ unsafe fn outer_child_entrypoint(arg: &mut OuterChildArg) -> Result<()> {
     ) else {
         bail_errno!("clone(2) failed");
     };
-    eprintln!("outer: inner_child_pid={inner_child_pid}");
+    log_fd!(lfd, "inner_child_pid={inner_child_pid}");
 
     // Send the PID of the inner child to the parent.
     socket_send(arg.pid_return_tx_fd, inner_child_pid)
         .map_err(|e| e.context("Failed to send to pid return socket"))?;
-    eprintln!("outer: sent to pid_return_fd: {inner_child_pid}");
+    log_fd!(lfd, "sent to pid_return_fd: {inner_child_pid}");
 
     // Exit cleanly.
     Ok(())
@@ -496,11 +548,13 @@ unsafe fn outer_child_entrypoint(arg: &mut OuterChildArg) -> Result<()> {
 struct InnerChildArg {
     cmd: *const Command,
     idmap_sync_rx_fd: c_int,
+    log_inner_tx_fd: c_int,
 }
 
 #[cfg_attr(debug_assertions, no_alloc)]
 extern "C" fn inner_child_extern(arg: *mut c_void) -> c_int {
     let arg: &mut InnerChildArg = unsafe { &mut *(arg as *mut InnerChildArg) };
+    let lfd = arg.log_inner_tx_fd;
 
     // Catch any panics.
     // SAFETY: We do not use the argument after it's moved into this function.
@@ -509,14 +563,14 @@ extern "C" fn inner_child_extern(arg: *mut c_void) -> c_int {
     })) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("inner: caught panic: {e:?}");
+            log_fd!(lfd, "caught panic: {e:?}");
             return 126;
         }
     };
 
     result
         .map(|()| 0)
-        .map_err(|e| eprintln!("inner: error: {}", e))
+        .map_err(|e| log_fd!(lfd, "error: {}", e))
         .unwrap_or(42)
 }
 
@@ -525,12 +579,12 @@ extern "C" fn inner_child_extern(arg: *mut c_void) -> c_int {
 #[cfg_attr(debug_assertions, no_alloc)]
 unsafe fn inner_child_entrypoint(arg: &mut InnerChildArg) -> Result<()> {
     let cmd: &Command = &*arg.cmd;
+    let lfd = arg.log_inner_tx_fd;
 
     let pid = libc::getpid();
     let (uid, euid) = (libc::getuid(), libc::geteuid());
     let (gid, egid) = (libc::getgid(), libc::getegid());
-    eprintln!("inner: pid={pid}");
-    eprintln!("inner: uid={uid} euid={euid} gid={gid} egid={egid}");
+    log_fd!(lfd, "pid={pid} uid={uid} euid={euid} gid={gid} egid={egid}");
 
     // If we're in a mount namespace, remount the root as slave recursive.
     if cmd.namespaces.mount {
@@ -546,15 +600,17 @@ unsafe fn inner_child_entrypoint(arg: &mut InnerChildArg) -> Result<()> {
             bail_errno!("remounting root as slave recursive failed");
         };
     }
-    eprintln!("inner: remounted root as recursive slave");
+    log_fd!(lfd, "remounted root as recursive slave");
 
     // Mount the user-supplied mount table.
     for mount in &cmd.mounts.mounts {
         // NOTE: There is a TOCTOU race condition between reading the filetype of the source, and creating the right kind of mountpoint. Normally this is not an issue, but it will cause a failure if the source filetype changes from file to directory.
         if let Some(mut mountpoint_type) = mount.create_mountpoint {
-            eprintln!(
-                "inner: creating mountpoint for {:?} on {:?}",
-                mount.source, mount.target
+            log_fd!(
+                lfd,
+                "creating mountpoint for {:?} on {:?}",
+                mount.source,
+                mount.target
             );
 
             // If the mountpoint type is DetermineFromSource, `stat()` the source.
@@ -588,9 +644,12 @@ unsafe fn inner_child_entrypoint(arg: &mut InnerChildArg) -> Result<()> {
             }
         }
 
-        eprintln!(
-            "inner: mounting {:?} on {:?} type {:?}",
-            mount.source, mount.target, mount.fstype
+        log_fd!(
+            lfd,
+            "mounting {:?} on {:?} type {:?}",
+            mount.source,
+            mount.target,
+            mount.fstype
         );
         let 0 = libc::mount(
             mount.source.as_ptr(),
@@ -668,7 +727,10 @@ unsafe fn inner_child_entrypoint(arg: &mut InnerChildArg) -> Result<()> {
 
     let (uid, euid) = (libc::getuid(), libc::geteuid());
     let (gid, egid) = (libc::getgid(), libc::getegid());
-    eprintln!("inner: after setuid/setgid: uid={uid} euid={euid} gid={gid} egid={egid}");
+    log_fd!(
+        lfd,
+        "after setuid/setgid: uid={uid} euid={euid} gid={gid} egid={egid}"
+    );
 
     // Execute the child command.
     let 0 = libc::execve(cmd.command, cmd.args.as_ptr(), cmd.envp.as_ptr()) else {
@@ -834,6 +896,20 @@ fn mkdirp(path: *const c_char) -> Result<()> {
     mkdir_ignoring_eexist(buf.as_ptr().cast())?;
 
     Ok(())
+}
+
+/// Start a thread to forward logs written to a socket to a particular span in the host's tracing
+/// log.
+fn spawn_log_forwarder(span: tracing::Span, log_rx_fd: libc::c_int) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        // Create a UnixStream from the FD
+        let log_outer_rx = unsafe { std::os::unix::net::UnixStream::from_raw_fd(log_rx_fd) };
+
+        // Loop over lines
+        for line in std::io::BufReader::new(log_outer_rx).lines().flatten() {
+            debug!(parent: &span, "{}", line);
+        }
+    })
 }
 
 #[cfg(test)]
