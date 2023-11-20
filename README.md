@@ -7,7 +7,7 @@ Embeddable, customizable rootless containerization for Rust.
 - [x] M1: Steel Thread
 - [x] M2: Mount Namespace and Filesystem Control
 - [x] M3: PID namespace and UID mapping
-- [ ] M4: Control groups
+- [x] M4: Control groups
 
 ## Features
 

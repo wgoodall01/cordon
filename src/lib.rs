@@ -5,6 +5,7 @@ use std::ptr;
 
 pub mod id_map;
 pub mod mount_table;
+pub mod systemd;
 
 /// In test builds, use alloc_counter to verify at runtime that the functions which must be
 /// async-signal-safe do not allocate.
@@ -57,9 +58,10 @@ impl Error {
             context: Some(msg),
         }
     }
+}
 
-    /// Create from a [`std::io::Error`].
-    fn from_io_error(e: std::io::Error) -> Error {
+impl From<std::io::Error> for Error {
+    fn from(e: std::io::Error) -> Error {
         Error {
             errno: e.raw_os_error().unwrap_or(0),
             cause: None,
@@ -166,6 +168,9 @@ pub struct Command {
 
     /// Mount these filesystems in the container after any mount namespace has been set up.
     pub mounts: mount_table::MountTable,
+
+    /// Configure a cgroup through a transient systemd scope for the child process.
+    pub scope: Option<systemd::ScopeParameters>,
 }
 
 /// Bitset of namespaces to enter.
@@ -233,6 +238,12 @@ pub unsafe fn spawn(cmd: Command) -> Result<Child> {
     let (pid_return_tx_fd, pid_return_rx_fd) = socket_pair()
         .map_err(|e| e.context("Failed to create socketpair for pid return socket"))?;
 
+    // Create a socket to wait for cgroup creation.
+    // This prevents the outer process from exiting before a cgroup has been arranged for it and
+    // its children.
+    let (cgroup_sync_tx_fd, cgroup_sync_rx_fd) = socket_pair()
+        .map_err(|e| e.context("Failed to create socketpair for cgroup sync socket"))?;
+
     // Create the child in a new user namespace.
     let mut clone_flags = 0;
 
@@ -255,6 +266,7 @@ pub unsafe fn spawn(cmd: Command) -> Result<Child> {
     let mut outer_child_arg = OuterChildArg {
         cmd: &cmd,
         idmap_sync_rx_fd,
+        cgroup_sync_rx_fd,
         pid_return_tx_fd,
         inner_child_stack,
     };
@@ -270,6 +282,21 @@ pub unsafe fn spawn(cmd: Command) -> Result<Child> {
 
     eprintln!("spawn: outer_child_pid={outer_child_pid}");
 
+    // Ask systemd to arrange a cgroup for our child process.
+    if let Some(scope_config) = cmd.scope {
+        systemd::start_transient_unit(outer_child_pid.try_into().unwrap(), scope_config).map_err(
+            |e| {
+                eprintln!("spawn: failed to start systemd unit: {e}");
+                Error::new().cause("Failed to start transient systemd unit")
+            },
+        )?;
+    }
+
+    // If using a cgroup: signal that we're done waiting for the cgroup.
+    // If not using a cgroup: signal anyways.
+    socket_send::<u8>(cgroup_sync_tx_fd, 0)
+        .map_err(|e| e.context("Failed to send to cgroup sync socket"))?;
+
     // Write the UID map.
     if let Some(uid_map) = cmd.uid_map {
         eprintln!("spawn: writing uid_map");
@@ -277,20 +304,20 @@ pub unsafe fn spawn(cmd: Command) -> Result<Child> {
             format!("/proc/{outer_child_pid}/uid_map"),
             uid_map.into_idmap_file_contents(),
         )
-        .map_err(Error::from_io_error)
+        .map_err(Error::from)
         .map_err(|e| e.context("Failed to write UID map"))?;
     }
 
     // Disable setgroups and set the GID map.
     if let Some(gid_map) = cmd.gid_map {
         std::fs::write(format!("/proc/{outer_child_pid}/setgroups"), "deny\n")
-            .map_err(Error::from_io_error)
+            .map_err(Error::from)
             .map_err(|e| e.context("Failed to disable setgroups"))?;
         std::fs::write(
             format!("/proc/{outer_child_pid}/gid_map"),
             gid_map.into_idmap_file_contents(),
         )
-        .map_err(Error::from_io_error)
+        .map_err(Error::from)
         .map_err(|e| e.context("Failed to write UID map"))?;
     }
 
@@ -327,6 +354,7 @@ impl Child {
 struct OuterChildArg {
     cmd: *const Command,
     idmap_sync_rx_fd: c_int,
+    cgroup_sync_rx_fd: c_int,
     pid_return_tx_fd: c_int,
     inner_child_stack: Vec<u8>,
 }
@@ -440,6 +468,10 @@ unsafe fn outer_child_entrypoint(arg: &mut OuterChildArg) -> Result<()> {
         cmd: arg.cmd,
         idmap_sync_rx_fd: arg.idmap_sync_rx_fd,
     };
+
+    // Wait for our cgroup to be created before we clone.
+    socket_recv::<u8>(arg.cgroup_sync_rx_fd)
+        .map_err(|e| e.context("Failed to read from cgroup sync socket"))?;
 
     // Create the inner child.
     let inner_child_pid @ 0.. = libc::clone(
@@ -830,6 +862,7 @@ mod tests {
             pivot_root_to: None,
             set_working_dir: None,
             mounts: mount_table::MountTable::new(),
+            scope: None,
         };
 
         let child = unsafe { spawn(cmd) }.unwrap();
@@ -843,7 +876,7 @@ mod tests {
     #[test]
     fn userns_id_exits_0() {
         let cmd_path = CString::new("/usr/bin/id").unwrap();
-        let _null_fd = unsafe { libc::open("/dev/null\0".as_ptr().cast(), libc::O_RDONLY) };
+        let null_fd = unsafe { libc::open("/dev/null\0".as_ptr().cast(), libc::O_RDONLY) };
 
         let mut uid_map = id_map::IdMap::new();
         uid_map.map_one(unsafe { libc::getuid() }, 0);
@@ -854,10 +887,9 @@ mod tests {
             envp: vec![ptr::null()],
             stdin_fd: None,
             stdout_fd: None,
-            stderr_fd: None,
+            stderr_fd: Some(null_fd),
             namespaces: NamespaceSet {
                 user: true,
-                mount: true,
                 ..NamespaceSet::default()
             },
             uid_map: Some(uid_map),
@@ -867,6 +899,7 @@ mod tests {
             pivot_root_to: None,
             set_working_dir: None,
             mounts: mount_table::MountTable::new(),
+            scope: None,
         };
 
         let child = unsafe { spawn(cmd) }.unwrap();

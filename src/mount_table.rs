@@ -1,4 +1,4 @@
-
+use c_str_macro::c_str;
 use std::ffi::{CStr, CString};
 
 #[derive(Debug, Clone)]
@@ -122,7 +122,7 @@ impl MountTable {
     }
 
     /// Adds a tmpfs mount to the mount table.
-    pub fn add_temp(&mut self, target: impl Into<CString>) -> &mut Mount {
+    pub fn add_temp(&mut self, target: impl Into<CString>) {
         self.add_mount(
             CString::new("<dummy>").unwrap(),
             target,
@@ -130,18 +130,35 @@ impl MountTable {
             0,
             None::<CString>,
         )
-        .create_mountpoint(MountpointType::Dir)
+        .create_mountpoint(MountpointType::Dir);
     }
 
     /// Adds a procfs mount at `/proc`.
-    pub fn add_proc(&mut self) -> &mut Mount {
+    pub fn add_proc(&mut self) {
         self.add_mount(
             CString::new("proc").unwrap(),
             CString::new("proc").unwrap(),
             CString::new("proc").unwrap(),
             0,
             None::<CString>,
-        )
-        .create_mountpoint(MountpointType::Dir)
+        );
+    }
+
+    /// Bind-mounts the host's `/sys` at `/sys`
+    pub fn add_sys(&mut self) {
+        self.add_bind(c_str!("/sys"), c_str!("/sys"))
+            .create_mountpoint(MountpointType::Dir);
+    }
+
+    /// Remounts the root of the cgroup namespace at `/sys/fs/cgroup`
+    pub fn add_sys_cgroup(&mut self) {
+        self.add_temp(c_str!("/sys/fs/cgroup"));
+        self.add_mount(
+            CString::new("cgroup").unwrap(),
+            CString::new("/sys/fs/cgroup").unwrap(),
+            CString::new("cgroup2").unwrap(), // We use cgroups v2
+            0,
+            None::<CString>,
+        );
     }
 }

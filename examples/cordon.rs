@@ -9,7 +9,7 @@ pub fn main() {
     let _null_fd = unsafe { libc::open("/dev/null\0".as_ptr().cast(), libc::O_RDWR) };
 
     let target_uid = 0;
-    let target_gid = 4242;
+    let target_gid = 0;
 
     // Create the staging dir in some tmpfs on the host. We need an actual directory
     // somewhere, so that we can mount something (perhaps tmpfs) over it, create the rest of the mounts in that mount, and then pivot_root into it.
@@ -35,8 +35,10 @@ pub fn main() {
         c_str!("/"),
     );
 
-    // Mount procfs.
+    // Mount /proc and /sys
     mount_table.add_proc();
+    mount_table.add_sys();
+    mount_table.add_sys_cgroup();
 
     let cmd_path = CString::new("/bin/sh").unwrap();
 
@@ -52,7 +54,7 @@ pub fn main() {
             pid: true,
             user: true,
             network: false,
-            cgroup: false,
+            cgroup: true,
             ..Default::default()
         },
         set_uid: None,
@@ -62,6 +64,10 @@ pub fn main() {
         pivot_root_to: Some(b"/dev/shm/cordon_root\0".as_ptr()),
         set_working_dir: None,
         mounts: mount_table,
+        scope: Some(cordon::systemd::ScopeParameters {
+            description: Some("Cordon example scope".to_string()),
+            ..cordon::systemd::ScopeParameters::with_unique_name()
+        }),
     };
 
     let child = unsafe { cordon::spawn(cmd) }.unwrap();
