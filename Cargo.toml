@@ -1,6 +1,9 @@
 [package]
 name = "cordon"
 description = "Embeddable sandboxing a-la-carte"
+documentation = "https://docs.rs/cordon"
+homepage = "github.com/wgoodall01/cordon"
+repository = "github.com/wgoodall01/cordon"
 license = "MIT"
 version = "0.1.0"
 edition = "2021"
