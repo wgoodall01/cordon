@@ -324,26 +324,6 @@ unsafe fn outer_child_entrypoint(arg: &mut OuterChildArg) -> Result<()> {
 
     log_fd!(lfd, "pid={pid} uid={uid} euid={euid} gid={gid} egid={egid}");
 
-    // Configure stdin, stdout, and stderr.
-    if let Some(stdin_fd) = ctx.stdin_fd {
-        log_fd!(lfd, "set stdin_fd={stdin_fd}");
-        let 0.. = libc::dup2(stdin_fd, libc::STDIN_FILENO) else {
-            bail_errno!("dup2(stdin_fd) failed");
-        };
-    }
-    if let Some(stdout_fd) = ctx.stdout_fd {
-        log_fd!(lfd, "set stdout_fd={stdout_fd}");
-        let 0.. = libc::dup2(stdout_fd, libc::STDOUT_FILENO) else {
-            bail_errno!("dup2(stdout_fd) failed");
-        };
-    }
-    if let Some(stderr_fd) = ctx.stderr_fd {
-        log_fd!(lfd, "set stderr_fd={stderr_fd}");
-        let 0.. = libc::dup2(stderr_fd, libc::STDERR_FILENO) else {
-            bail_errno!("dup2(stderr_fd) failed");
-        };
-    }
-
     // Calculate the clone flags for the child.
     let mut clone_flags = 0;
 
@@ -608,6 +588,26 @@ unsafe fn inner_child_entrypoint(arg: &mut InnerChildArg) -> Result<()> {
             lfd,
             "after setuid/setgid: uid={uid} euid={euid} gid={gid} egid={egid}"
         );
+    }
+
+    // Configure stdin, stdout, and stderr.
+    if let Some(stdin_fd) = ctx.stdin_fd {
+        log_fd!(lfd, "set stdin_fd={stdin_fd}");
+        let 0.. = libc::dup2(stdin_fd, libc::STDIN_FILENO) else {
+            bail_errno!("dup2(stdin_fd) failed");
+        };
+    }
+    if let Some(stdout_fd) = ctx.stdout_fd {
+        log_fd!(lfd, "set stdout_fd={stdout_fd}");
+        let 0.. = libc::dup2(stdout_fd, libc::STDOUT_FILENO) else {
+            bail_errno!("dup2(stdout_fd) failed");
+        };
+    }
+    if let Some(stderr_fd) = ctx.stderr_fd {
+        log_fd!(lfd, "set stderr_fd={stderr_fd}");
+        let 0.. = libc::dup2(stderr_fd, libc::STDERR_FILENO) else {
+            bail_errno!("dup2(stderr_fd) failed");
+        };
     }
 
     // Execute the child command.
