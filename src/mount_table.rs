@@ -141,7 +141,7 @@ impl MountTable {
             CString::new("proc").unwrap(),
             0,
             None::<CString>,
-        );
+        ).create_mountpoint(MountpointType::Dir);
     }
 
     /// Bind-mounts the host's `/sys` at `/sys`
