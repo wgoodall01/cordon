@@ -2,8 +2,8 @@
 name = "cordon"
 description = "Embeddable sandboxing a-la-carte"
 documentation = "https://docs.rs/cordon"
-homepage = "github.com/wgoodall01/cordon"
-repository = "github.com/wgoodall01/cordon"
+homepage = "https://github.com/wgoodall01/cordon"
+repository = "https://github.com/wgoodall01/cordon"
 license = "MIT"
 version = "0.1.0"
 edition = "2021"
@@ -22,3 +22,7 @@ tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 
 [dev-dependencies]
 eyre = "0.6.9"
+
+[package.metadata.release]
+tag-message = "Release {{crate_name}} v{{version}}"
+pre-release-commit-message = "Release {{crate_name}} v{{version}}"
