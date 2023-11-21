@@ -475,8 +475,8 @@ unsafe fn inner_child_entrypoint(arg: &mut InnerChildArg) -> Result<()> {
         ) else {
             bail_errno!("remounting root as slave recursive failed");
         };
+        log_fd!(lfd, "remounted root as recursive slave");
     }
-    log_fd!(lfd, "remounted root as recursive slave");
 
     // Mount the user-supplied mount table.
     for mount in &ctx.mounts.mounts {
@@ -601,12 +601,14 @@ unsafe fn inner_child_entrypoint(arg: &mut InnerChildArg) -> Result<()> {
         };
     }
 
-    let (uid, euid) = (libc::getuid(), libc::geteuid());
-    let (gid, egid) = (libc::getgid(), libc::getegid());
-    log_fd!(
-        lfd,
-        "after setuid/setgid: uid={uid} euid={euid} gid={gid} egid={egid}"
-    );
+    if ctx.set_uid.is_some() || ctx.set_gid.is_some() {
+        let (uid, euid) = (libc::getuid(), libc::geteuid());
+        let (gid, egid) = (libc::getgid(), libc::getegid());
+        log_fd!(
+            lfd,
+            "after setuid/setgid: uid={uid} euid={euid} gid={gid} egid={egid}"
+        );
+    }
 
     // Execute the child command.
     let 0 = libc::execve(ctx.command, ctx.args.as_ptr(), ctx.envp.as_ptr()) else {
