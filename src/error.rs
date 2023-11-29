@@ -1,4 +1,3 @@
-use alloc_counter::no_alloc;
 use std::ffi::c_int;
 
 /// Result type for our error type.
@@ -15,7 +14,7 @@ pub struct Error {
 
 impl Error {
     /// Create an empty error.
-    #[cfg_attr(debug_assertions, no_alloc)]
+    #[cfg_attr(debug_assertions, alloc_counter::no_alloc)]
     pub fn new() -> Error {
         Error {
             errno: 0,
@@ -25,7 +24,7 @@ impl Error {
     }
 
     /// Create an error from the last OS error.
-    #[cfg_attr(debug_assertions, no_alloc)]
+    #[cfg_attr(debug_assertions, alloc_counter::no_alloc)]
     pub fn last_os_error() -> Error {
         Error {
             errno: unsafe { *libc::__errno_location() },
@@ -35,7 +34,7 @@ impl Error {
     }
 
     /// Replace the cause of an error.
-    #[cfg_attr(debug_assertions, no_alloc)]
+    #[cfg_attr(debug_assertions, alloc_counter::no_alloc)]
     pub fn cause(self, msg: &'static str) -> Error {
         Error {
             errno: self.errno,
@@ -45,7 +44,7 @@ impl Error {
     }
 
     /// Replace the context of an error.
-    #[cfg_attr(debug_assertions, no_alloc)]
+    #[cfg_attr(debug_assertions, alloc_counter::no_alloc)]
     pub fn context(self, msg: &'static str) -> Error {
         Error {
             errno: self.errno,
@@ -58,6 +57,7 @@ impl Error {
 impl std::error::Error for Error {}
 
 impl From<std::io::Error> for Error {
+    #[cfg_attr(debug_assertions, alloc_counter::no_alloc)]
     fn from(e: std::io::Error) -> Error {
         Error {
             errno: e.raw_os_error().unwrap_or(0),
@@ -68,6 +68,7 @@ impl From<std::io::Error> for Error {
 }
 
 impl std::fmt::Display for Error {
+    #[cfg_attr(debug_assertions, alloc_counter::no_alloc)]
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         // Get the error message from errno.
         let error_msg = unsafe { libc::strerror(self.errno) };

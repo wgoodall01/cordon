@@ -1,11 +1,10 @@
-use alloc_counter::no_alloc;
 use std::ffi::{c_char, c_int, c_void};
 use std::mem;
 
 use crate::error::{bail, bail_errno, Error, Result};
 
 /// Get the topmost valid stack pointer inside a segment of stack memory.
-#[cfg_attr(debug_assertions, no_alloc)]
+#[cfg_attr(debug_assertions, alloc_counter::no_alloc)]
 pub unsafe fn get_topmost_stack_pointer(stack: &mut [u8]) -> *mut c_void {
     let top_addr = stack.as_mut_ptr().add(stack.len()) as *mut c_void;
 
@@ -16,14 +15,19 @@ pub unsafe fn get_topmost_stack_pointer(stack: &mut [u8]) -> *mut c_void {
 }
 
 /// Create a Unix stream socket pair.
-#[cfg_attr(debug_assertions, no_alloc)]
+#[cfg_attr(debug_assertions, alloc_counter::no_alloc)]
 pub fn socket_pair() -> Result<(c_int, c_int)> {
-    // Create a socket pair, so we can signal the child to continue once we write the uid map,
-    // disable setgroups, and write the gid map.
+    // Create a socket pair for communication between the parent and child.
+    // We pass the `SOCK_CLOEXEC` flag to ensure that the socket is closed on `execve()`.
     let mut socket_fds = [0; 2];
-    let 0.. =
-        (unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, socket_fds.as_mut_ptr()) })
-    else {
+    let 0.. = (unsafe {
+        libc::socketpair(
+            libc::AF_UNIX,
+            libc::SOCK_STREAM | libc::SOCK_CLOEXEC,
+            0,
+            socket_fds.as_mut_ptr(),
+        )
+    }) else {
         bail_errno!("failed to create socketpair");
     };
     let [a, b] = socket_fds;
@@ -31,7 +35,7 @@ pub fn socket_pair() -> Result<(c_int, c_int)> {
 }
 
 /// Send a value, interpretable as bytes, to a socket's file descriptor.
-#[cfg_attr(debug_assertions, no_alloc)]
+#[cfg_attr(debug_assertions, alloc_counter::no_alloc)]
 pub unsafe fn socket_send<T: Copy>(sock_fd: c_int, value: T) -> Result<()> {
     let size = mem::size_of::<T>();
 
@@ -50,7 +54,7 @@ pub unsafe fn socket_send<T: Copy>(sock_fd: c_int, value: T) -> Result<()> {
 }
 
 /// Receive a value, interpretable as bytes, from a socket's file descriptor.
-#[cfg_attr(debug_assertions, no_alloc)]
+#[cfg_attr(debug_assertions, alloc_counter::no_alloc)]
 pub unsafe fn socket_recv<T: Copy>(sock_fd: c_int) -> Result<T> {
     let size = mem::size_of::<T>();
     // assert!(size > 0, "cannot receive zero-sized type");
@@ -100,7 +104,7 @@ impl ExitStatus {
     }
 }
 
-#[cfg_attr(debug_assertions, no_alloc)]
+#[cfg_attr(debug_assertions, alloc_counter::no_alloc)]
 pub unsafe fn waitpid(pid: c_int) -> Result<ExitStatus> {
     let mut status: c_int = 0;
     let 0.. = (unsafe { libc::waitpid(pid, &mut status as *mut c_int, 0) }) else {
@@ -109,33 +113,7 @@ pub unsafe fn waitpid(pid: c_int) -> Result<ExitStatus> {
     ExitStatus::from_wait_status(status)
 }
 
-#[cfg_attr(debug_assertions, no_alloc)]
-pub fn write_str(path: *const c_char, contents: *const c_char, flags: c_int) -> Result<()> {
-    let fd @ 0.. = (unsafe { libc::open(path, flags) }) else {
-        bail_errno!("failed to open file for writing");
-    };
-
-    // TODO: Can we avoid `strlen()` here?
-    let len = unsafe { libc::strlen(contents) };
-
-    let mut bytes_written = 0;
-    while bytes_written < len {
-        let bytes =
-            unsafe { libc::write(fd, contents.add(bytes_written).cast(), len - bytes_written) };
-        if bytes < 0 {
-            bail_errno!("failed to write to file");
-        }
-        bytes_written += bytes as usize;
-    }
-
-    let 0.. = (unsafe { libc::close(fd) }) else {
-        bail_errno!("failed to close file after writing");
-    };
-
-    Ok(())
-}
-
-#[cfg_attr(debug_assertions, no_alloc)]
+#[cfg_attr(debug_assertions, alloc_counter::no_alloc)]
 pub fn stat(path: *const c_char) -> Result<libc::stat> {
     let mut stat_buf = mem::MaybeUninit::<libc::stat>::uninit();
     let 0.. = (unsafe { libc::stat(path, stat_buf.as_mut_ptr()) }) else {
@@ -145,7 +123,7 @@ pub fn stat(path: *const c_char) -> Result<libc::stat> {
 }
 
 /// Create a directory for all non-existent path components of `path`.
-#[cfg_attr(debug_assertions, no_alloc)]
+#[cfg_attr(debug_assertions, alloc_counter::no_alloc)]
 pub fn mkdirp(path: *const c_char) -> Result<()> {
     let mkdir_ignoring_eexist = |path: *const c_char| -> Result<()> {
         let mkdir_result = unsafe { libc::mkdir(path, 0o755) };

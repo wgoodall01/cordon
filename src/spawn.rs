@@ -1,4 +1,3 @@
-use alloc_counter::no_alloc;
 use std::ffi::{c_char, c_int, c_void};
 use std::io::{BufRead, Write};
 use std::os::fd::FromRawFd;
@@ -23,18 +22,24 @@ const STACK_SIZE: usize = 8 * 1024 * 1024; // 8 MB
 macro_rules! log_fd {
     ($fd:expr, $fmt:expr) => {
         {
-            let mut buffer = [0u8; 2048];
-            let mut cursor = std::io::Cursor::new(&mut buffer[..]);
-            let _ = writeln!(cursor, $fmt);
-            let _ = unsafe {libc::write($fd, cursor.get_ref().as_ptr() as *const c_void, cursor.position() as usize)};
+            let fd: c_int = $fd;
+            if fd != -1 {
+                let mut buffer = [0u8; 2048];
+                let mut cursor = std::io::Cursor::new(&mut buffer[..]);
+                let _ = writeln!(cursor, $fmt);
+                let _ = unsafe {libc::write(fd, cursor.get_ref().as_ptr() as *const c_void, cursor.position() as usize)};
+            }
         }
     };
     ($fd:expr, $fmt:expr, $($arg:tt)*) => {
         {
-            let mut buffer = [0u8; 2048];
-            let mut cursor = std::io::Cursor::new(&mut buffer[..]);
-            let _ = writeln!(cursor, $fmt, $($arg)*);
-            let _ = unsafe {libc::write($fd, cursor.get_ref().as_ptr() as *const c_void, cursor.position() as usize)};
+            let fd: c_int = $fd;
+            if fd != -1 {
+                let mut buffer = [0u8; 2048];
+                let mut cursor = std::io::Cursor::new(&mut buffer[..]);
+                let _ = writeln!(cursor, $fmt, $($arg)*);
+                let _ = unsafe {libc::write($fd, cursor.get_ref().as_ptr() as *const c_void, cursor.position() as usize)};
+            }
         }
     };
 }
@@ -86,6 +91,9 @@ pub struct Context {
 
     /// Configure a cgroup through a transient systemd scope for the child process.
     pub scope: Option<systemd::ScopeParameters>,
+
+    /// If set, log the details of the spawning procedure.
+    pub forward_spawn_logs: bool,
 }
 
 /// Bitset of namespaces to enter.
@@ -113,6 +121,9 @@ pub struct Child {
 /// For safety, this function __cannot__ return until the child has been executed. This is
 /// because the child entrypoints may borrow memory from the parent.
 ///
+/// Note: This function may allocate, because it never needs to run in an async-signal-safe
+/// context.
+///
 /// # Safety
 ///
 /// The pointers in `ctx` must be valid until this function returns.
@@ -120,17 +131,25 @@ pub unsafe fn spawn(ctx: Context) -> Result<Child> {
     let span = span!(Level::DEBUG, "spawn");
     let _span_guard = span.enter();
 
-    // Create the outer child's log stream.
-    let (log_outer_tx_fd, log_outer_rx_fd) = socket_pair()
-        .map_err(|e| e.context("Failed to create log stream for outer child socket"))?;
-    let log_outer_span = span!(Level::DEBUG, "outer");
-    let _log_outer_follower_handle = spawn_log_forwarder(log_outer_span.clone(), log_outer_rx_fd);
+    let (log_outer_tx_fd, log_inner_tx_fd) = if ctx.forward_spawn_logs {
+        // Create the outer span, socket, and forwarder thread.
+        let log_outer_span = span!(Level::DEBUG, "outer");
+        let (log_outer_tx_fd, log_outer_rx_fd) = socket_pair()
+            .map_err(|e| e.context("Failed to create log stream for outer child socket"))?;
+        spawn_log_forwarder(log_outer_span.clone(), log_outer_rx_fd);
 
-    // Create the inner child's log stream.
-    let (log_inner_tx_fd, log_inner_rx_fd) = socket_pair()
-        .map_err(|e| e.context("Failed to create log stream for inner child socket"))?;
-    let log_inner_span = span!(parent: log_outer_span, Level::DEBUG, "inner");
-    let _log_inner_follower_handle = spawn_log_forwarder(log_inner_span, log_inner_rx_fd);
+        // Create the inner span, socket, and forwarder thread.
+        let log_inner_span = span!(parent: &log_outer_span, Level::DEBUG, "inner");
+        let (log_inner_tx_fd, log_inner_rx_fd) = socket_pair()
+            .map_err(|e| e.context("Failed to create log stream for inner child socket"))?;
+        spawn_log_forwarder(log_inner_span, log_inner_rx_fd);
+
+        (log_outer_tx_fd, log_inner_tx_fd)
+    } else {
+        // If logging is disabled, return a sentinel value to disable log log writes from
+        // the children.
+        (-1, -1)
+    };
 
     // Create the IdMap sync socket.
     // We send one byte from the parent to the child once the uid_map and gid_map have been
@@ -286,7 +305,7 @@ struct OuterChildArg {
     inner_child_stack: Vec<u8>,
 }
 
-#[cfg_attr(debug_assertions, no_alloc)]
+#[cfg_attr(debug_assertions, alloc_counter::no_alloc)]
 extern "C" fn outer_child_extern(arg: *mut c_void) -> c_int {
     let arg: &mut OuterChildArg = unsafe { &mut *(arg as *mut OuterChildArg) };
     let lfd = arg.log_outer_tx_fd;
@@ -311,7 +330,7 @@ extern "C" fn outer_child_extern(arg: *mut c_void) -> c_int {
 
 /// Handler for the outer clone.
 /// - Runs inside userns.
-#[cfg_attr(debug_assertions, no_alloc)]
+#[cfg_attr(debug_assertions, alloc_counter::no_alloc)]
 unsafe fn outer_child_entrypoint(arg: &mut OuterChildArg) -> Result<()> {
     let lfd: c_int = arg.log_outer_tx_fd;
     let ctx: &Context = &*arg.ctx;
@@ -407,7 +426,7 @@ struct InnerChildArg {
     log_inner_tx_fd: c_int,
 }
 
-#[cfg_attr(debug_assertions, no_alloc)]
+#[cfg_attr(debug_assertions, alloc_counter::no_alloc)]
 extern "C" fn inner_child_extern(arg: *mut c_void) -> c_int {
     let arg: &mut InnerChildArg = unsafe { &mut *(arg as *mut InnerChildArg) };
     let lfd = arg.log_inner_tx_fd;
@@ -432,7 +451,7 @@ extern "C" fn inner_child_extern(arg: *mut c_void) -> c_int {
 
 /// Handler for the inner clone, if necessary, or simply called by the outer entrypoint.
 /// - Runs inside all namespaces.
-#[cfg_attr(debug_assertions, no_alloc)]
+#[cfg_attr(debug_assertions, alloc_counter::no_alloc)]
 unsafe fn inner_child_entrypoint(arg: &mut InnerChildArg) -> Result<()> {
     let ctx: &Context = &*arg.ctx;
     let lfd = arg.log_inner_tx_fd;
@@ -659,6 +678,7 @@ mod tests {
             set_working_dir: None,
             mounts: mount_table::MountTable::new(),
             scope: None,
+            forward_spawn_logs: true,
         };
 
         let child = unsafe { spawn(ctx) }.unwrap();
@@ -696,6 +716,7 @@ mod tests {
             set_working_dir: None,
             mounts: mount_table::MountTable::new(),
             scope: None,
+            forward_spawn_logs: true,
         };
 
         let child = unsafe { spawn(cmd) }.unwrap();

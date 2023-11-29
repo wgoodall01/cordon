@@ -70,6 +70,8 @@ pub fn main() -> eyre::Result<()> {
 
         // Systemd integration and cgroup parameters.
         scope: None,
+
+        forward_spawn_logs: true,
     };
 
     // Spawn the child process.

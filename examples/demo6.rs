@@ -77,6 +77,8 @@ pub fn main() -> eyre::Result<()> {
             memory_max: Some(1024 * 1024 * 1024),
             ..cordon::systemd::ScopeParameters::with_unique_name()
         }),
+
+        forward_spawn_logs: true,
     };
 
     // Spawn the child process.

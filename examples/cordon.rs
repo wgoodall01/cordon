@@ -1,6 +1,5 @@
 use c_str_macro::c_str;
-use cordon::id_map::IdMap;
-use cordon::mount_table::MountTable;
+use cordon::{IdMap, MountTable};
 use std::ffi::CString;
 
 use std::ptr;
@@ -83,6 +82,7 @@ pub fn main() {
             description: Some("Cordon example scope".to_string()),
             ..cordon::systemd::ScopeParameters::with_unique_name()
         }),
+        forward_spawn_logs: true,
     };
 
     let child = unsafe { cordon::spawn(ctx) }.unwrap();
