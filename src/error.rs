@@ -98,7 +98,7 @@ impl std::fmt::Display for Error {
 // Define a macro, bail!, which returns an error with no errno and a custom message.
 macro_rules! bail {
     ($msg:expr) => {
-        return Err(Error {
+        return Err(crate::error::Error {
             errno: 0,
             cause: Some($msg),
             context: None,
@@ -113,10 +113,10 @@ pub(crate) use bail;
 // - `bail_errno!(msg)` returns an error with the last OS error and a context message.
 macro_rules! bail_errno {
     () => {
-        return Err(Error::last_os_error());
+        return Err(crate::error::Error::last_os_error());
     };
     ($msg:expr) => {
-        return Err(Error::last_os_error().cause($msg));
+        return Err(crate::error::Error::last_os_error().cause($msg));
     };
 }
 pub(crate) use bail_errno;
