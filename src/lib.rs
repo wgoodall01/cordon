@@ -9,7 +9,7 @@ pub mod systemd;
 mod command;
 
 pub use id_map::IdMap;
-pub use mount_table::MountTable;
+pub use mount_table::{MountTable, MountpointType};
 
 pub use command::{Child, Command, ExitStatus, Namespace};
 

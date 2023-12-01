@@ -56,14 +56,14 @@ pub fn main() {
 
     let cmd_path = CString::new("/bin/sh").unwrap();
 
-    let ctx = cordon::Context {
+    let ctx = cordon::spawn::Context {
         command: cmd_path.as_ptr(),
         args: vec![cmd_path.as_ptr(), ptr::null()],
         envp: vec![b"ENVVAR=test\0".as_ptr(), ptr::null()],
         stdin_fd: None,
         stdout_fd: None,
         stderr_fd: None,
-        namespaces: cordon::NamespaceSet {
+        namespaces: cordon::spawn::NamespaceSet {
             mount: true,
             pid: true,
             user: true,
@@ -85,7 +85,7 @@ pub fn main() {
         forward_spawn_logs: true,
     };
 
-    let child = unsafe { cordon::spawn(ctx) }.unwrap();
+    let child = unsafe { cordon::spawn::spawn(ctx) }.unwrap();
 
     let exit = child.wait().unwrap();
     eprintln!("exit={exit:?}");

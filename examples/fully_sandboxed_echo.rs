@@ -4,11 +4,12 @@ use tracing::info;
 mod common;
 
 pub fn main() -> eyre::Result<()> {
-    common::configure_logging();
+    // common::configure_logging();
 
     let mut cmd = cordon::Command::new("/bin/sh");
-    cmd.verbose(true);
+    // cmd.verbose(true);
     cmd.env("ENVVAR", "test");
+    cmd.args(&["-c", "echo 'Hello, World!'"]);
     cmd.unshare(cordon::Namespace::User);
     cmd.unshare(cordon::Namespace::Mount);
     cmd.unshare(cordon::Namespace::Pid);

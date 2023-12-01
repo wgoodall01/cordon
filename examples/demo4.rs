@@ -5,7 +5,7 @@
 //! - Running `echo $$` will show that the shell is running as PID 1.
 
 use c_str_macro::c_str;
-use cordon::{IdMap, MountTable, NamespaceSet};
+use cordon::{IdMap, MountTable};
 use std::ptr;
 use tracing::info;
 mod common;
@@ -16,7 +16,7 @@ pub fn main() -> eyre::Result<()> {
     let executable_path = c_str!("/bin/sh");
 
     // A `Context` describes the behavior of Cordon's sandboxing.
-    let ctx = cordon::Context {
+    let ctx = cordon::spawn::Context {
         // The binary to run, arguments, and environment.
         command: executable_path.as_ptr(),
         args: vec![executable_path.as_ptr(), ptr::null()],
@@ -29,7 +29,7 @@ pub fn main() -> eyre::Result<()> {
         stderr_fd: None,
 
         // Namespace configuration.
-        namespaces: NamespaceSet {
+        namespaces: cordon::spawn::NamespaceSet {
             user: true,  // Unshared at the first fork.
             mount: true, // Unshared at the second fork, because we need root privileges to do so.
             pid: true,   // Unshared at the second fork, making the inner child PID 1.
@@ -55,7 +55,7 @@ pub fn main() -> eyre::Result<()> {
     };
 
     // Spawn the child process.
-    let child = unsafe { cordon::spawn(ctx) }?;
+    let child = unsafe { cordon::spawn::spawn(ctx) }?;
 
     // Wait for the child to exit.
     let exit = child.wait()?;
