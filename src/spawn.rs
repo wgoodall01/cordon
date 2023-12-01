@@ -1,3 +1,5 @@
+//! Low-level API for spawning cordoned processes, requiring manual memory management.
+
 use std::ffi::{c_char, c_int, c_void};
 use std::io::{BufRead, Write};
 use std::os::fd::FromRawFd;

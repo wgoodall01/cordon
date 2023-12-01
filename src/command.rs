@@ -6,8 +6,9 @@ use std::path::{Path, PathBuf};
 use std::ptr;
 
 use crate::error::{bail, Error, Result};
+use crate::spawn::NamespaceSet;
 use crate::{libc_util, spawn, systemd};
-use crate::{IdMap, MountTable, NamespaceSet};
+use crate::{IdMap, MountTable};
 
 /// A command to be launched within the cordon.
 pub struct Command {
@@ -49,6 +50,7 @@ pub struct Child(spawn::Child);
 #[derive(Debug, Clone, Copy)]
 pub struct ExitStatus(libc_util::ExitStatus);
 
+/// A namespace which can be unshared from the host.
 #[derive(Debug, Clone, Copy)]
 pub enum Namespace {
     Cgroup,
@@ -356,7 +358,36 @@ impl Command {
 }
 
 impl Child {
+    /// Waits for the child to exit, returning its exit status.
     pub fn wait(self) -> Result<ExitStatus> {
         Ok(ExitStatus(self.0.wait()?))
+    }
+
+    /// If the child is running in a systemd scope, gets a handle to it.
+    pub fn scope(&self) -> Option<systemd::ScopeHandle> {
+        self.0.scope().cloned()
+    }
+}
+
+impl ExitStatus {
+    /// Returns true if the child process exited successfully.
+    pub fn success(&self) -> bool {
+        self.0.success()
+    }
+
+    /// Gets the exit code of the child process.
+    pub fn code(&self) -> Option<i32> {
+        match self.0 {
+            libc_util::ExitStatus::Code(code) => Some(code),
+            _ => None,
+        }
+    }
+
+    /// Gets the signal number of the child process exit, if it was killed.
+    pub fn signal(&self) -> Option<i32> {
+        match self.0 {
+            libc_util::ExitStatus::Signal(sig) => Some(sig),
+            _ => None,
+        }
     }
 }

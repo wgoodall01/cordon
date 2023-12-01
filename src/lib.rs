@@ -3,16 +3,15 @@ mod libc_util;
 mod error;
 mod id_map;
 mod mount_table;
-mod spawn;
+pub mod spawn;
 pub mod systemd;
 
 mod command;
 
 pub use id_map::IdMap;
 pub use mount_table::MountTable;
-pub use spawn::{spawn, Context, NamespaceSet};
 
-pub use command::{Child, Command, Namespace, ExitStatus};
+pub use command::{Child, Command, ExitStatus, Namespace};
 
 /// In test builds, use alloc_counter to verify at runtime that the functions which must be
 /// async-signal-safe do not allocate.

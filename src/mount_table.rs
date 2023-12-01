@@ -1,6 +1,7 @@
 use c_str_macro::c_str;
 use std::ffi::{CStr, CString};
 
+/// A list of mounts to be carried out inside the child process.
 #[derive(Debug, Clone)]
 pub struct MountTable {
     /// The list of mounts.
@@ -141,7 +142,8 @@ impl MountTable {
             CString::new("proc").unwrap(),
             0,
             None::<CString>,
-        ).create_mountpoint(MountpointType::Dir);
+        )
+        .create_mountpoint(MountpointType::Dir);
     }
 
     /// Bind-mounts the host's `/sys` at `/sys`

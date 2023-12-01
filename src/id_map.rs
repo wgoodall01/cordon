@@ -1,3 +1,4 @@
+/// A user or group ID mapping table.
 #[derive(Clone, Debug)]
 pub struct IdMap {
     mappings: Vec<Mapping>,
