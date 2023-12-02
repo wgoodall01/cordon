@@ -5,7 +5,7 @@ documentation = "https://docs.rs/cordon"
 homepage = "https://github.com/wgoodall01/cordon"
 repository = "https://github.com/wgoodall01/cordon"
 license = "MIT"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
