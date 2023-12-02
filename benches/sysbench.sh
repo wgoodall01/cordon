@@ -15,4 +15,4 @@ echo "--- Sysbench inside container"
 
 echo
 echo "--- Sysbench outside container"
-sysbench --test=cpu run
+sysbench --test=cpu --num-threads=8 run

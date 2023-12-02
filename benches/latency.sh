@@ -7,7 +7,7 @@ cd "$DIR"
 # Build the code
 cargo build --release --example fully_sandboxed_echo
 cargo build --release --example non_sandboxed_echo
-cargo build --release --example std_echo
+cargo build --release --example std_echostd_echo
 
 # Benchmark vs. docker
 hyperfine \

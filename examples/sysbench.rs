@@ -9,7 +9,7 @@ pub fn main() -> eyre::Result<()> {
     let mut cmd = cordon::Command::new("/usr/bin/sysbench");
     cmd.verbose(true);
     cmd.env("ENVVAR", "test");
-    cmd.args(&["--test=cpu", "run"]);
+    cmd.args(&["--test=cpu", "--num-threads=8", "run"]);
     cmd.unshare(cordon::Namespace::User);
     cmd.unshare(cordon::Namespace::Mount);
     cmd.unshare(cordon::Namespace::Pid);
@@ -32,7 +32,7 @@ pub fn main() -> eyre::Result<()> {
     });
     cmd.scope(cordon::systemd::ScopeParameters {
         description: Some("Cordon sysbench!".into()),
-        tasks_max: Some(8),
+        tasks_max: Some(16),
         ..cordon::systemd::ScopeParameters::with_unique_name()
     });
 
