@@ -29,7 +29,7 @@ pub fn main() -> eyre::Result<()> {
         mt
     });
     cmd.scope(cordon::systemd::ScopeParameters {
-        description: Some("Cordon demo number six!".into()),
+        description: Some("Sandboxed Echo".into()),
         tasks_max: Some(8),
         memory_max: Some(1024 * 1024 * 1024),
         ..cordon::systemd::ScopeParameters::with_unique_name()

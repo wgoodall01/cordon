@@ -258,24 +258,25 @@ impl Command {
 
     /// Executes a command as a child process, waiting for it to finish and collecting
     /// its status.
-    pub fn status(self) -> Result<ExitStatus> {
+    pub fn status(&self) -> Result<ExitStatus> {
         let child = self.spawn()?;
         Ok(child.wait()?)
     }
 
     /// Spawn the subprocess, and return a handle to it.
-    pub fn spawn(self) -> Result<Child> {
+    pub fn spawn(&self) -> Result<Child> {
         // Null-terminate the command.
-        let Ok(command) = CString::new(self.command) else {
+        let Ok(command) = CString::new(self.command.clone()) else {
             bail!("command contains an interior NUL");
         };
 
         // Collect the arguments.
         let args_buf = self
             .args
-            .into_iter()
+            .iter()
             .map(|e| {
-                CString::new(e).map_err(|_| Error::new().cause("argument contains internal NUL"))
+                CString::new(e.clone())
+                    .map_err(|_| Error::new().cause("argument contains internal NUL"))
             })
             .collect::<Result<Vec<_>>>()?;
         let mut args: Vec<*const c_char> = args_buf.iter().map(|a| a.as_ptr()).collect();
@@ -292,17 +293,17 @@ impl Command {
                 Ok((k, v))
             })
             .collect::<Result<_>>()?;
-        for var in self.env {
+        for var in &self.env {
             match var {
                 (k, Some(v)) => {
-                    let k = CString::new(k)
+                    let k = CString::new(k.clone())
                         .map_err(|_| Error::new().cause("env key contains internal NUL"))?;
-                    let v = CString::new(v)
+                    let v = CString::new(v.clone())
                         .map_err(|_| Error::new().cause("env key contains internal NUL"))?;
                     env_map.insert(k, v);
                 }
                 (k, None) => {
-                    let k = CString::new(k)
+                    let k = CString::new(k.clone())
                         .map_err(|_| Error::new().cause("env key contains internal NUL"))?;
                     env_map.remove(&k);
                 }
@@ -321,13 +322,17 @@ impl Command {
         let mut envp = envp_buf.iter().map(|e| e.as_ptr()).collect::<Vec<_>>();
         envp.push(ptr::null());
 
-        let pivot_root_buf = self.pivot_root_to.map(|e| CString::new(e).unwrap());
+        let pivot_root_buf = self
+            .pivot_root_to
+            .as_ref()
+            .map(|e| CString::new(e.clone()).unwrap());
         let pivot_root_to = pivot_root_buf.as_ref().map(|e| e.as_ptr());
 
         // convert pathbuf to *const c_char
         let set_working_dir_buf = self
             .set_working_dir
-            .map(|e| CString::new(e.into_os_string().into_vec()).unwrap());
+            .as_ref()
+            .map(|e| CString::new(e.clone().into_os_string().into_vec()).unwrap());
         let set_working_dir = set_working_dir_buf.as_ref().map(|e| e.as_ptr());
 
         // Set up the context.
@@ -335,18 +340,18 @@ impl Command {
             command: command.as_ptr(),
             args,
             envp,
-            stdin_fd: self.stdin.map(|fd| fd.as_raw_fd()),
-            stdout_fd: self.stdout.map(|fd| fd.as_raw_fd()),
-            stderr_fd: self.stderr.map(|fd| fd.as_raw_fd()),
+            stdin_fd: self.stdin.as_ref().map(|fd| fd.as_raw_fd()),
+            stdout_fd: self.stdout.as_ref().map(|fd| fd.as_raw_fd()),
+            stderr_fd: self.stderr.as_ref().map(|fd| fd.as_raw_fd()),
             namespaces: self.namespaces,
-            uid_map: self.uid_map,
-            gid_map: self.gid_map,
+            uid_map: self.uid_map.clone(),
+            gid_map: self.gid_map.clone(),
             set_uid: self.set_uid,
             set_gid: self.set_gid,
             pivot_root_to,
             set_working_dir,
-            mounts: self.mounts,
-            scope: self.scope,
+            mounts: self.mounts.clone(),
+            scope: self.scope.clone(),
             forward_spawn_logs: self.forward_spawn_logs,
         };
 
